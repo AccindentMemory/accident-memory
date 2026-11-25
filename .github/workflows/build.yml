@@ -1,0 +1,69 @@
+name: Build accident_memory.knl
+
+# Run it by hand: Actions tab -> "Build accident_memory.knl" -> Run workflow.
+# It also runs every time you change a file.
+on:
+  workflow_dispatch:
+  push:
+
+env:
+  SDK_VERSION: "3.2"                    # Hundekraft SDK to build against
+  TOOLCHAIN_SCRIPT_SHA256: "0cc1681787db556e3deea525a004f010a1c049c6dd67a906900f772447d57c72"
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: sudo apt-get update && sudo apt-get install -y build-essential curl xz-utils bzip2 texinfo
+
+      # The Blackfin compiler is built once (30-60 min), then kept in the cache.
+      - name: Restore compiler cache
+        id: tc
+        uses: actions/cache@v4
+        with:
+          path: ~/bfin/tc
+          key: bfin-elf-gcc-13.3.0-binutils-2.42-v1
+
+      - name: Build the Blackfin compiler (first run only)
+        if: steps.tc.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          # Duck Call's script (GPL-3.0), checked against the version that was reviewed.
+          curl -fsSL https://raw.githubusercontent.com/ssimorka/duck-call/main/tools/build-bfin-toolchain.sh -o bt.sh
+          echo "$TOOLCHAIN_SCRIPT_SHA256  bt.sh" | sha256sum -c -
+          bash bt.sh
+
+      - name: Download and check the Hundekraft SDK
+        run: |
+          set -euo pipefail
+          V="hundekraft-${SDK_VERSION}-source"
+          BASE=https://hundekraft.github.io/op1-workshop/source
+          curl -fsSLO "$BASE/$V.tar.gz"
+          curl -fsSLO "$BASE/$V.tar.gz.sha256"
+          want=$(awk '{print $1}' "$V.tar.gz.sha256")
+          have=$(sha256sum "$V.tar.gz" | awk '{print $1}')
+          [ "$want" = "$have" ] || { echo "SDK checksum mismatch"; exit 1; }
+          tar xzf "$V.tar.gz"
+
+      - name: Pack the plugin
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/bfin/tc/bin:$PATH"
+          bfin-elf-gcc --version | head -1
+          K="hundekraft-${SDK_VERSION}-source/ext/kennel"
+          mkdir -p "$K/synth_sdk/plugins/accident_memory" "$K/build"
+          cp plugin/accident_memory/* "$K/synth_sdk/plugins/accident_memory/"
+          (cd "$K" && python3 tools/kennel/pack.py synth_sdk/plugins/accident_memory -o build/accident_memory.knl)
+          mkdir -p out
+          cp "$K/build/accident_memory.knl" out/
+          ls -l out
+          sha256sum out/accident_memory.knl
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: accident_memory_knl
+          path: out/accident_memory.knl
