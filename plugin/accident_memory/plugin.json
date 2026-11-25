@@ -1,0 +1,17 @@
+{
+  "name": "accident_memory",
+  "kind": "fx",
+  "order": 0,
+  "symbol": "FX_accident_memory",
+  "sources": [
+    "accident_memory.c"
+  ],
+  "defaults": [
+    8000,
+    16000,
+    4000,
+    32767
+  ],
+  "loadable": true,
+  "claims": []
+}
