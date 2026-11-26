@@ -1,0 +1,26 @@
+{
+  "name": "g-rainy",
+  "kind": "fx",
+  "order": 0,
+  "symbol": "FX_g_rainy",
+  "author": "Accident Memory",
+  "version": "0.2.0",
+  "sources": [
+    "g_rainy.c",
+    "plate_dsp.c"
+  ],
+  "defaults": [
+    16384,
+    8192,
+    12000,
+    6000
+  ],
+  "page2_defaults": [
+    0,
+    0,
+    0
+  ],
+  "loadable": true,
+  "stereo": true,
+  "claims": []
+}
