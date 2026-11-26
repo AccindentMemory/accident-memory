@@ -3,15 +3,23 @@
   "kind": "fx",
   "order": 0,
   "symbol": "FX_accident_memory",
+  "author": "Accident Memory",
+  "version": "0.4.0",
   "sources": [
     "accident_memory.c"
   ],
   "defaults": [
-    8000,
-    16000,
-    4000,
-    32767
+    16384,
+    28000,
+    6000,
+    6000
+  ],
+  "page2_defaults": [
+    0,
+    0,
+    0
   ],
   "loadable": true,
+  "stereo": true,
   "claims": []
 }
