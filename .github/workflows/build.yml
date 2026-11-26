@@ -1,6 +1,6 @@
-name: Build accident_memory.knl
+name: Build .knl plugins
 
-# Run it by hand: Actions tab -> "Build accident_memory.knl" -> Run workflow.
+# Run it by hand: Actions tab -> "Build .knl plugins" -> Run workflow.
 # It also runs every time you change a file.
 on:
   workflow_dispatch:
@@ -49,21 +49,29 @@ jobs:
           [ "$want" = "$have" ] || { echo "SDK checksum mismatch"; exit 1; }
           tar xzf "$V.tar.gz"
 
-      - name: Pack the plugin
+      - name: Pack every plugin in plugin/
         run: |
           set -euo pipefail
           export PATH="$HOME/bfin/tc/bin:$PATH"
           bfin-elf-gcc --version | head -1
           K="hundekraft-${SDK_VERSION}-source/ext/kennel"
-          mkdir -p "$K/synth_sdk/plugins/accident_memory" "$K/build"
-          cp plugin/accident_memory/* "$K/synth_sdk/plugins/accident_memory/"
-          (cd "$K" && python3 tools/kennel/pack.py synth_sdk/plugins/accident_memory -o build/accident_memory.knl)
-          mkdir -p out
-          cp "$K/build/accident_memory.knl" out/
+          mkdir -p "$K/build" out
+          for d in plugin/*/; do
+            n=$(basename "$d")
+            echo "=== $n"
+            mkdir -p "$K/synth_sdk/plugins/$n"
+            cp "$d"* "$K/synth_sdk/plugins/$n/"
+            if [ "$n" = g-rainy ]; then
+              # Hundekraft's plate reverb source comes from the SDK, so it is not copied into this repo.
+              cp "$K"/synth_sdk/plugins/plate/plate_dsp.c "$K"/synth_sdk/plugins/plate/plate_dsp.h "$K"/synth_sdk/plugins/plate/plate_tables.h "$K/synth_sdk/plugins/$n/"
+            fi
+            (cd "$K" && python3 tools/kennel/pack.py "synth_sdk/plugins/$n" -o "build/$n.knl")
+            cp "$K/build/$n.knl" out/
+          done
           ls -l out
-          sha256sum out/accident_memory.knl
+          sha256sum out/*.knl
 
       - uses: actions/upload-artifact@v4
         with:
-          name: accident_memory_knl
-          path: out/accident_memory.knl
+          name: knl_files
+          path: out/*.knl
