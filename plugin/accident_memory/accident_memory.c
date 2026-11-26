@@ -1,10 +1,10 @@
-/* Accident Memory, step 4.0: stereo master.
+/* Accident Memory, step 5.0: stereo master + custom screen (see the end of this file).
  * Built on the 3.6 base (the keeper version; the 3.7 Blur lowpass and Drift
  * tremolo were rejected as muddy and are NOT in this file). The master
  * slot now renders in true stereo (plugin.json "stereo": true), while
  * the synth and drum slots keep the unchanged mono render. The two
- * delay lines become the stereo pair, the way the Cosmos assigns its
- * L/R inputs to different delay groups: line 1 takes the left input,
+ * delay lines become the stereo pair, the way many hardware delay units
+ * assign L/R inputs to different delay groups: line 1 takes the left input,
  * line 2 takes the right input. Drift is now a true panorama - the left
  * wet is line 1 weighted by (1-bal) plus line 2 weighted by bal, the
  * right wet is the mirror, so the LFO swings the sound between the
@@ -41,7 +41,7 @@
  * between the lines, and cross-feedback between the lines (the Blur
  * knob), so the lines smear into each other. The loop is soft-limited
  * like tape instead of hard-clipped, and feedback stops just below 1.0,
- * the way the Cosmos manual recommends.
+ * so the loop can never run away.
  *
  * Knobs (blue, green, white, orange): Mix, Feedback (capped 0.99),
  * Drift, Blur. Presses: blue = Freeze latch, green = Drive page 2,
@@ -363,3 +363,126 @@ static void am_render_stereo(int pos, int16_t *left, int16_t *right, const int16
  * orange = Erase latch. The mono prefix is unchanged; the master slot
  * calls render_stereo. */
 const op1_fx_stereo_t FX_accident_memory = { { am_init, am_render, { OP1_PRESS_LATCH, OP1_PRESS_PAGE, OP1_PRESS_LATCH, OP1_PRESS_LATCH } }, am_render_stereo };
+
+/* ======================= screen (GUI thread) =======================
+ * accident_memory.svg holds the static art (dial ticks, dial bases, needles). Everything that moves is drawn here:
+ * two orbits (the two delay lines, in their 0.544 s : 0.703 s proportion) with a comet trail of fading echoes on
+ * each. Nothing here touches the audio state; the screen only reads the knobs and the latch flags.
+ *   Drift  = orbit speed       Feedback = trail length      Blur = echo size      Mix = brightness
+ *   Freeze = orbits stop and turn light blue      Reverse = orbits turn the other way
+ *   Erase  = the trails vanish for a moment       Drive (green page 2) = ring on the green dial, needle shows Drive
+ * Dials sit in the bottom row, over the four encoders: blue Mix, green Feedback, white Drift, red Blur. */
+#define AM_DIAL_Y   128
+#define AM_ORB_CX   160
+#define AM_ORB_CY   52
+#define AM_ORB_R1   18
+#define AM_ORB_R2   33
+static const int16_t am_dial_x[4] = { 70, 130, 190, 250 };
+static const uint8_t am_dial_col[4][4] = { { 77, 158, 255, 255 }, { 0, 237, 149, 255 }, { 255, 255, 255, 255 }, { 255, 58, 93, 255 } };
+static const uint8_t AM_COL_ORBIT[4] = { 0x4A, 0x4C, 0x4E, 0xFF };
+static const uint8_t AM_COL_FROZEN[4] = { 0xBF, 0xD8, 0xFF, 0xFF };
+
+static void *am_bars[4];
+static uint32_t am_ph1[3], am_ph2[3];   /* orbit phases, 2^32 = one turn */
+static uint8_t am_prev_erase[3], am_flash[3];
+
+static inline int32_t am_ssin(int32_t a) { return OP1_SINE_TABLE[a & 8191]; }   /* 8192 = one turn */
+
+static void am_sline(void *r, int32_t x0, int32_t y0, int32_t x1, int32_t y1, int32_t w, const uint8_t *c)
+{
+    op1_pt a = { x0, y0 }, b = { x1, y1 };
+    op1_raster_line(r, &a, &b, w, c);
+}
+
+/* a ring (16 segments), Q10 */
+static void am_sring(void *r, int32_t cx, int32_t cy, int32_t rad, const uint8_t *c)
+{
+    op1_pt p = { cx + rad, cy };
+    for (int a = 512; a <= 8192; a += 512) {
+        op1_pt q = { cx + (rad * am_ssin(a + 2048) >> 15), cy + (rad * am_ssin(a) >> 15) };
+        op1_raster_line(r, &p, &q, 0x500, c);
+        p = q;
+    }
+}
+
+/* one echo: a short dash along the orbit at angle a (8192 = one turn, 0 = up, clockwise) */
+static void am_sdash(void *r, int32_t rad, int32_t a, int32_t w, const uint8_t *c)
+{
+    const int32_t cx = OP1_Q10(AM_ORB_CX), cy = OP1_Q10(AM_ORB_CY);
+    const int32_t a1 = a, a2 = a + 150;
+    am_sline(r, cx + (rad * am_ssin(a1) >> 15), cy - (rad * am_ssin(a1 + 2048) >> 15),
+                cx + (rad * am_ssin(a2) >> 15), cy - (rad * am_ssin(a2 + 2048) >> 15), w, c);
+}
+
+static void am_screen_init(void *scr)
+{
+    static const char *ids[4] = { "bar0", "bar1", "bar2", "bar3" };
+    for (int i = 0; i < 4; i++) am_bars[i] = op1_find_node(scr, ids[i]);
+}
+
+static void am_screen_update(void *scr, int dt)
+{
+    const int pos = op1_fx_screen_pos();
+    const int pi = pos % 3;
+    const int16_t *w = op1_fx_knobs(pos);
+    int16_t k[4];
+    op1_fx_knobs_live(k);
+    const uint8_t frozen = op1_fx_page[pi][0], drivepage = op1_fx_page[pi][1];
+    const uint8_t reversed = op1_fx_page[pi][2], erase = op1_fx_page[pi][3];
+
+    /* dial needles: green shows the Drive word while its page 2 is on */
+    int32_t val[4] = { k[0], drivepage ? w[6] : k[1], k[2], k[3] };
+    for (int i = 0; i < 4; i++) if (am_bars[i]) {
+        int32_t a = (val[i] * 6144 >> 15) - 3072;
+        op1_node_rotate(am_bars[i], OP1_Q10(am_dial_x[i]), OP1_Q10(AM_DIAL_Y), am_ssin(a), am_ssin(a + 2048));
+    }
+
+    /* erase: a short flash on the rising edge of the latch (the audio side wipes the memory once) */
+    if (erase && !am_prev_erase[pi]) am_flash[pi] = 24;
+    am_prev_erase[pi] = erase;
+    const int flashing = am_flash[pi] > 0;
+    if (flashing) am_flash[pi]--;
+
+    /* orbits: Drift sets the speed (per frame); the second orbit is ~1.29x faster, like the delay-length ratio */
+    if (!frozen) {
+        uint32_t inc1 = 3600000u + (uint32_t)(k[2] * 20000);       /* ~1 turn per 20 s .. 3 s at 60 fps */
+        uint32_t inc2 = inc1 + (inc1 >> 2) + (inc1 >> 5);
+        if (reversed) { am_ph1[pi] -= inc1; am_ph2[pi] -= inc2; }
+        else          { am_ph1[pi] += inc1; am_ph2[pi] += inc2; }
+    }
+
+    op1_screen_draw(scr, dt);
+    void *r = op1_raster();
+
+    /* orbits */
+    const uint8_t *orbit_col = frozen ? AM_COL_FROZEN : AM_COL_ORBIT;
+    am_sring(r, OP1_Q10(AM_ORB_CX), OP1_Q10(AM_ORB_CY), OP1_Q10(AM_ORB_R1), orbit_col);
+    am_sring(r, OP1_Q10(AM_ORB_CX), OP1_Q10(AM_ORB_CY), OP1_Q10(AM_ORB_R2), orbit_col);
+
+    /* echoes: a bright head and a fading trail behind it. Trail length = Feedback, size = Blur, brightness = Mix */
+    const int trail = flashing ? 0 : 2 + ((k[1] * 6) >> 15);              /* 2 .. 8 */
+    const int32_t bright = 8192 + ((k[0] * 24575) >> 15);                 /* Q15, 25% .. 100% */
+    const int32_t wbase = 0x1400 + ((k[3] * 0x1000) >> 15);               /* 5 .. 9 px */
+    for (int o = 0; o < 2; o++) {
+        const int32_t rad = OP1_Q10(o ? AM_ORB_R2 : AM_ORB_R1);
+        const int32_t head = (int32_t)((o ? am_ph2[pi] : am_ph1[pi]) >> 19);   /* 0 .. 8191 */
+        for (int e = 0; e <= trail; e++) {
+            const int32_t fade = 32767 - ((32767 * e) / (trail + 1));          /* trail+1 <= 9: a small division, GUI thread */
+            const int32_t g = (fade * bright) >> 15;                           /* Q15 */
+            uint8_t c[4];
+            if (frozen) { c[0] = (191 * g) >> 15; c[1] = (216 * g) >> 15; c[2] = (255 * g) >> 15; }
+            else        { c[0] = c[1] = c[2] = (236 * g) >> 15; }
+            c[3] = 0xFF;
+            int32_t wd = wbase - e * 0x180;
+            if (wd < 0x600) wd = 0x600;
+            am_sdash(r, rad, reversed ? head + e * 420 : head - e * 420, wd, c);
+        }
+    }
+
+    /* rings on the dials: Freeze (blue), Drive page (green), Reverse (white), Erase flash (red) */
+    const uint8_t on[4] = { frozen, drivepage, reversed, (uint8_t)flashing };
+    for (int i = 0; i < 4; i++)
+        if (on[i]) am_sring(r, OP1_Q10(am_dial_x[i]), OP1_Q10(AM_DIAL_Y), OP1_Q10(17), am_dial_col[i]);
+}
+
+const op1_screen_t SCREEN_accident_memory = { am_screen_init, am_screen_update };
